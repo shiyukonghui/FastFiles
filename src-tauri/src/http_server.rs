@@ -4,27 +4,86 @@ use actix_web::http::header::{
     ACCEPT_RANGES, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS,
 };
 use actix_web::body::BoxBody;
-use bytes::Bytes;
-use memmap2::Mmap;
 use socket2::{Socket, Domain, Type, Protocol};
 use std::io;
 use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use futures_util::StreamExt;
 
 use crate::file_manager::FileManager;
 use crate::sendfile;
 
-// mmap 包装器，用于 bytes::Bytes 的零拷贝视图
-struct MmapBytes(Mmap);
+const CHUNK_SIZE: usize = 16 * 1024 * 1024; // 8MB 分块读取
+const CHANNEL_CAP: usize = 16; // 通道容量（最多 64MB 数据在传输中）
 
-impl AsRef<[u8]> for MmapBytes {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
+/// 流式读取文件，通过 spawn_blocking + mpsc 通道逐块传输
+/// 内存占用恒定 = CHUNK_SIZE + 通道缓冲（最大 ~64MB 每连接）
+fn file_stream(
+    path: std::path::PathBuf,
+    start_offset: u64,
+    length: u64,
+) -> impl futures_util::Stream<Item = Result<web::Bytes, actix_web::Error>> {
+    let (tx, rx) = mpsc::channel::<Result<web::Bytes, std::io::Error>>(CHANNEL_CAP);
+
+    tokio::task::spawn_blocking(move || {
+        let mut file = match std::fs::File::open(&path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = tx.blocking_send(Err(e));
+                return;
+            }
+        };
+
+        // 通知操作系统顺序读优化
+        if let Ok(metadata) = file.metadata() {
+            sendfile::fadvise_sequential(&file, metadata.len());
+        }
+
+        if start_offset > 0 {
+            use std::io::{Seek, SeekFrom};
+            if let Err(e) = file.seek(SeekFrom::Start(start_offset)) {
+                let _ = tx.blocking_send(Err(e));
+                return;
+            }
+        }
+
+        let mut remaining = length;
+        let initial_cap = CHUNK_SIZE.min(remaining as usize).max(1);
+        let mut buf = vec![0u8; initial_cap];
+
+        while remaining > 0 {
+            let to_read = buf.len().min(remaining as usize);
+            match io::Read::read(&mut file, &mut buf[..to_read]) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    if tx.blocking_send(Ok(web::Bytes::copy_from_slice(&buf[..n]))).is_err() {
+                        break; // 接收端已关闭（客户端断开）
+                    }
+                    remaining -= n as u64;
+                }
+                Err(e) => {
+                    let _ = tx.blocking_send(Err(e));
+                    break;
+                }
+            }
+        }
+    });
+
+    ReceiverStream::new(rx).map(|r| r.map_err(actix_web::Error::from))
 }
 
-// 安全：Mmap 是 Send + Sync（只读映射，不可变）
-unsafe impl Send for MmapBytes {}
-unsafe impl Sync for MmapBytes {}
+/// 读取文件的指定字节范围到内存（用于多范围请求的小段合并）
+fn read_file_range(path: &std::path::Path, start: u64, length: u64) -> io::Result<Vec<u8>> {
+    let mut file = std::fs::File::open(path)?;
+    use std::io::{Read, Seek, SeekFrom};
+    if start > 0 {
+        file.seek(SeekFrom::Start(start))?;
+    }
+    let mut buf = vec![0u8; length as usize];
+    file.read_exact(&mut buf)?;
+    Ok(buf)
+}
 
 /// 解析 Range 请求头
 #[derive(Debug, Clone)]
@@ -33,7 +92,6 @@ struct HttpRange {
     end: u64, // 包含边界
 }
 
-/// 多范围请求的各个段
 #[derive(Debug, Clone)]
 struct RangeRequest {
     ranges: Vec<HttpRange>,
@@ -68,14 +126,13 @@ fn parse_range_header(range_str: &str, file_size: u64) -> Option<RangeRequest> {
 
             let start: u64 = start_str.parse().ok()?;
             let end: u64 = if end_str.is_empty() {
-                // 开放范围: bytes=N-（从 N 到文件末尾）
                 file_size.saturating_sub(1)
             } else {
                 end_str.parse().ok()?
             };
 
             if start > end || start >= file_size {
-                return None; // 超出范围
+                return None;
             }
             ranges.push(HttpRange {
                 start,
@@ -109,7 +166,6 @@ fn format_file_size(size: u64) -> String {
     }
 }
 
-/// 根据文件扩展名返回对应的 Emoji 图标
 fn file_icon(file_name: &str) -> &'static str {
     let ext = file_name.rsplit('.').next().unwrap_or("").to_lowercase();
     match ext.as_str() {
@@ -266,7 +322,6 @@ wget -c "{{api_url}}"</div>
         <div class="footer">由 <strong>FastFiles</strong> 提供 · 局域网极速传输</div>
     </div>
     <script>
-        // 动态替换 CLI 命令中的 URL
         (function() {{
             var apiUrl = location.origin + '/api/download/{token}';
             var downloadUrl = location.origin + '/download/{token}';
@@ -370,26 +425,6 @@ async fn download_page(
     }
 }
 
-/// 用 mmap 打开文件并返回 Bytes（零拷贝视图）
-fn mmap_file(path: &std::path::Path, file_size: u64) -> io::Result<Bytes> {
-    if file_size == 0 {
-        return Ok(Bytes::new());
-    }
-
-    let file = std::fs::File::open(path)?;
-
-    // 通知操作系统预读优化（Linux）
-    sendfile::fadvise_sequential(&file, file_size);
-
-    // mmap 文件到虚拟地址空间（零拷贝，OS 按需分页）
-    let mmap = unsafe { Mmap::map(&file)? };
-
-    // 包装为 Bytes（引用计数管理 mmap 生命周期，无数据拷贝）
-    let owner = MmapBytes(mmap);
-    Ok(Bytes::from_owner(owner))
-}
-
-/// 构建 CORS 响应头
 fn add_cors_headers(response: &mut HttpResponseBuilder) {
     response.insert_header((ACCESS_CONTROL_ALLOW_ORIGIN, "*"));
     response.insert_header((
@@ -428,15 +463,6 @@ async fn api_download(
     let file_size = file.file_size;
     let file_name = file.file_name.clone();
 
-    // mmap 文件为 Bytes（零拷贝）
-    let full_bytes = match mmap_file(&file_path, file_size) {
-        Ok(b) => b,
-        Err(e) => {
-            return HttpResponse::InternalServerError()
-                .body(format!("无法读取文件: {}", e));
-        }
-    };
-
     // 解析 Range 请求头
     let range_header = req
         .headers()
@@ -445,10 +471,10 @@ async fn api_download(
 
     match range_header.and_then(|r| parse_range_header(r, file_size)) {
         Some(range_req) if range_req.ranges.len() == 1 => {
-            // 单范围请求 → 206 Partial Content
+            // 单范围 → 流式传输指定偏移的字节范围
             let r = &range_req.ranges[0];
             let length = r.end - r.start + 1;
-            let data = full_bytes.slice(r.start as usize..(r.end + 1) as usize);
+            let stream = file_stream(file_path.clone(), r.start, length);
 
             let mut response = HttpResponse::PartialContent();
             response
@@ -461,23 +487,31 @@ async fn api_download(
                     format!("attachment; filename=\"{}\"", file_name),
                 ));
             add_cors_headers(&mut response);
-            response.body(data)
+            response.streaming(stream)
         }
         Some(range_req) => {
-            // 多范围请求 → 206 + multipart/byteranges
+            // 多范围 → 读取各段到内存合并为 multipart 响应（通常段很小）
             let boundary = format!("fastfiles_boundary_{}", uuid::Uuid::new_v4());
             let content_type_val = format!("multipart/byteranges; boundary={}", boundary);
             let mut body_parts: Vec<u8> = Vec::new();
 
             for r in &range_req.ranges {
-                let data = full_bytes.slice(r.start as usize..(r.end + 1) as usize);
-                let part_header = format!(
-                    "--{}\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes {}-{}/{}\r\n\r\n",
-                    boundary, r.start, r.end, file_size
-                );
-                body_parts.extend_from_slice(part_header.as_bytes());
-                body_parts.extend_from_slice(&data);
-                body_parts.extend_from_slice(b"\r\n");
+                let length = r.end - r.start + 1;
+                match read_file_range(&file_path, r.start, length) {
+                    Ok(data) => {
+                        let part_header = format!(
+                            "--{}\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes {}-{}/{}\r\n\r\n",
+                            boundary, r.start, r.end, file_size
+                        );
+                        body_parts.extend_from_slice(part_header.as_bytes());
+                        body_parts.extend_from_slice(&data);
+                        body_parts.extend_from_slice(b"\r\n");
+                    }
+                    Err(e) => {
+                        return HttpResponse::InternalServerError()
+                            .body(format!("读取文件片段失败: {}", e));
+                    }
+                }
             }
             body_parts.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
 
@@ -489,7 +523,9 @@ async fn api_download(
             response.body(body_parts)
         }
         None => {
-            // 无 Range → 200 OK 完整文件
+            // 无 Range → 流式传输完整文件
+            let stream = file_stream(file_path, 0, file_size);
+
             let mut response = HttpResponse::Ok();
             response
                 .insert_header((CONTENT_TYPE, "application/octet-stream"))
@@ -500,7 +536,7 @@ async fn api_download(
                     format!("attachment; filename=\"{}\"", file_name),
                 ));
             add_cors_headers(&mut response);
-            response.body(full_bytes)
+            response.streaming(stream)
         }
     }
 }
@@ -513,10 +549,10 @@ fn create_listener() -> io::Result<(std::net::TcpListener, u16)> {
     // 端口复用
     socket.set_reuse_address(true)?;
 
-    // TCP_NODELAY：禁用 Nagle 算法，消除小包延迟（对文件传输至关重要）
+    // TCP_NODELAY：禁用 Nagle 算法，消除小包延迟
     socket.set_nodelay(true)?;
 
-    // 最大化 socket 缓冲区（使用系统支持的最大值）
+    // 最大化 socket 缓冲区
     let max_buf = sendfile::max_socket_buffer();
     let _ = socket.set_send_buffer_size(max_buf);
     let _ = socket.set_recv_buffer_size(max_buf);
@@ -525,7 +561,6 @@ fn create_listener() -> io::Result<(std::net::TcpListener, u16)> {
     let _ = socket.set_keepalive(true);
     #[cfg(target_os = "linux")]
     {
-        // Linux TCP keepalive 参数：30s 空闲后开始探测，每 10s 探测一次
         let sock_ref = socket2::SockRef::from(&socket);
         let _ = sock_ref.set_tcp_keepalive(
             Some(std::time::Duration::from_secs(30)),
@@ -535,7 +570,7 @@ fn create_listener() -> io::Result<(std::net::TcpListener, u16)> {
     }
 
     socket.bind(&addr.into())?;
-    socket.listen(2048)?; // 增大 backlog 以支持高并发连接
+    socket.listen(2048)?;
 
     let port = socket
         .local_addr()?
@@ -566,7 +601,6 @@ impl HttpFileServer {
 
         let fm_data = web::Data::from(file_manager);
 
-        // 使用 tokio 运行时 CPU 核心数作为 worker 数量
         let worker_count = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
@@ -579,8 +613,8 @@ impl HttpFileServer {
         })
         .workers(worker_count)
         .keep_alive(std::time::Duration::from_secs(120))
-        .client_request_timeout(std::time::Duration::from_secs(0)) // 无超时
-        .client_disconnect_timeout(std::time::Duration::from_secs(30)) // 断开后快速清理
+        .client_request_timeout(std::time::Duration::from_secs(0))
+        .client_disconnect_timeout(std::time::Duration::from_secs(30))
         .backlog(2048)
         .listen(listener)
         .map_err(|e| format!("绑定端口失败: {}", e))?

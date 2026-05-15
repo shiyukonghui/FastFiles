@@ -23,8 +23,6 @@ if-addrs = "0.13"
 futures-util = "0.3"
 tokio-stream = "0.1"
 socket2 = "0.5"
-memmap2 = "0.9"
-bytes = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
