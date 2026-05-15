@@ -4,6 +4,7 @@ use actix_web::http::header::{
     ACCEPT_RANGES, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS,
 };
 use actix_web::body::BoxBody;
+use memmap2::Mmap;
 use socket2::{Socket, Domain, Type, Protocol};
 use std::io;
 use std::sync::Arc;
@@ -14,11 +15,24 @@ use futures_util::StreamExt;
 use crate::file_manager::FileManager;
 use crate::sendfile;
 
-const CHUNK_SIZE: usize = 16 * 1024 * 1024; // 8MB 分块读取
-const CHANNEL_CAP: usize = 16; // 通道容量（最多 64MB 数据在传输中）
+const CHUNK_SIZE: usize = 64 * 1024 * 1024; // 64MB 分块，减少通道开销
+const CHANNEL_CAP: usize = 4; // 通道容量（最多 256MB 数据在管道中）
 
-/// 流式读取文件，通过 spawn_blocking + mpsc 通道逐块传输
-/// 内存占用恒定 = CHUNK_SIZE + 通道缓冲（最大 ~64MB 每连接）
+// mmap 包装器，使 bytes::Bytes 零拷贝引用 mmap 内存区域
+struct MmapBytes(Mmap);
+
+impl AsRef<[u8]> for MmapBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+unsafe impl Send for MmapBytes {}
+unsafe impl Sync for MmapBytes {}
+
+/// mmap 零拷贝 + 流式分块传输
+/// 核心：mmap 整个文件 → Bytes::from_owner（零拷贝）→ 分片 stream
+/// 内存：Linux 上 madvise(DONTNEED) 主动释放已发送页；每连接内存 ≈ CHUNK_SIZE × CHANNEL_CAP
 fn file_stream(
     path: std::path::PathBuf,
     start_offset: u64,
@@ -27,50 +41,111 @@ fn file_stream(
     let (tx, rx) = mpsc::channel::<Result<web::Bytes, std::io::Error>>(CHANNEL_CAP);
 
     tokio::task::spawn_blocking(move || {
-        let mut file = match std::fs::File::open(&path) {
-            Ok(f) => f,
-            Err(e) => {
-                let _ = tx.blocking_send(Err(e));
-                return;
-            }
-        };
-
-        // 通知操作系统顺序读优化
-        if let Ok(metadata) = file.metadata() {
-            sendfile::fadvise_sequential(&file, metadata.len());
-        }
-
-        if start_offset > 0 {
-            use std::io::{Seek, SeekFrom};
-            if let Err(e) = file.seek(SeekFrom::Start(start_offset)) {
-                let _ = tx.blocking_send(Err(e));
-                return;
-            }
-        }
-
-        let mut remaining = length;
-        let initial_cap = CHUNK_SIZE.min(remaining as usize).max(1);
-        let mut buf = vec![0u8; initial_cap];
-
-        while remaining > 0 {
-            let to_read = buf.len().min(remaining as usize);
-            match io::Read::read(&mut file, &mut buf[..to_read]) {
-                Ok(0) => break, // EOF
-                Ok(n) => {
-                    if tx.blocking_send(Ok(web::Bytes::copy_from_slice(&buf[..n]))).is_err() {
-                        break; // 接收端已关闭（客户端断开）
-                    }
-                    remaining -= n as u64;
-                }
-                Err(e) => {
-                    let _ = tx.blocking_send(Err(e));
-                    break;
-                }
-            }
+        // 尝试 mmap 路径（最高性能），失败回退到 read
+        if let Err(e) = stream_mmap(&path, start_offset, length, &tx) {
+            // mmap 失败，回退到传统 read 路径
+            stream_read(&path, start_offset, length, &tx, e);
         }
     });
 
     ReceiverStream::new(rx).map(|r| r.map_err(actix_web::Error::from))
+}
+
+/// mmap 零拷贝路径：Bytes::from_owner + Bytes::slice（零拷贝分片视图）
+fn stream_mmap(
+    path: &std::path::Path,
+    start_offset: u64,
+    length: u64,
+    tx: &mpsc::Sender<Result<web::Bytes, std::io::Error>>,
+) -> io::Result<()> {
+    let file = std::fs::File::open(path)?;
+
+    if let Ok(meta) = file.metadata() {
+        sendfile::fadvise_sequential(&file, meta.len());
+    }
+
+    // mmap 整个文件到虚拟地址空间
+    let mmap = unsafe { Mmap::map(&file)? };
+
+    // 零拷贝包装为 Bytes（引用计数管理 mmap 生命周期）
+    let full_bytes = web::Bytes::from_owner(MmapBytes(mmap));
+
+    let mut offset = start_offset as usize;
+    let end = (start_offset + length) as usize;
+
+    while offset < end {
+        let chunk_end = (offset + CHUNK_SIZE).min(end);
+
+        // Bytes::slice — 零拷贝子视图，共享底层 mmap
+        let chunk = full_bytes.slice(offset..chunk_end);
+
+        if tx.blocking_send(Ok(chunk)).is_err() {
+            break; // 客户端断开，停止发送
+        }
+
+        // Linux: 通知操作系统释放已发送页的物理内存
+        // 这是 madvise(MADV_DONTNEED) — 该页从进程工作集移除，OS 可回收
+        #[cfg(target_os = "linux")]
+        unsafe {
+            let ptr = full_bytes.as_ptr().add(offset) as *mut libc::c_void;
+            let len = chunk_end - offset;
+            libc::madvise(ptr, len, libc::MADV_DONTNEED);
+        }
+
+        offset = chunk_end;
+    }
+
+    Ok(())
+}
+
+/// 回退路径：传统 read 分块读取（mmap 失败时使用）
+fn stream_read(
+    path: &std::path::Path,
+    start_offset: u64,
+    length: u64,
+    tx: &mpsc::Sender<Result<web::Bytes, std::io::Error>>,
+    _mmap_err: io::Error,
+) {
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = tx.blocking_send(Err(e));
+            return;
+        }
+    };
+
+    if let Ok(meta) = file.metadata() {
+        sendfile::fadvise_sequential(&file, meta.len());
+    }
+
+    if start_offset > 0 {
+        use std::io::{Seek, SeekFrom};
+        if let Err(e) = file.seek(SeekFrom::Start(start_offset)) {
+            let _ = tx.blocking_send(Err(e));
+            return;
+        }
+    }
+
+    let mut remaining = length;
+    let initial_cap = CHUNK_SIZE.min(remaining as usize).max(1);
+    let mut buf = vec![0u8; initial_cap];
+
+    while remaining > 0 {
+        let to_read = buf.len().min(remaining as usize);
+        match io::Read::read(&mut file, &mut buf[..to_read]) {
+            Ok(0) => break,
+            Ok(n) => {
+                if tx.blocking_send(Ok(web::Bytes::copy_from_slice(&buf[..n]))).is_err() {
+                    break;
+                }
+                remaining -= n as u64;
+            }
+            Err(e) => {
+                let _ = tx.blocking_send(Err(e));
+                break;
+            }
+        }
+    }
 }
 
 /// 读取文件的指定字节范围到内存（用于多范围请求的小段合并）
