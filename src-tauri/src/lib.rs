@@ -1,6 +1,7 @@
 mod network;
 mod file_manager;
 pub mod http_server;
+pub mod sendfile;
 mod commands;
 
 use std::sync::{Arc, Mutex};
