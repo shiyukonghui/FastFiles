@@ -17,31 +17,30 @@ jobs:
   create-release:
     runs-on: ubuntu-latest
     outputs:
-      release_id: ${{ steps.create_release.outputs.id }}
+      release_id: ${{ steps.create_release.outputs.release_id }}
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
 
       - name: 创建 Release
         id: create_release
-        uses: actions/create-release@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref_name }}
-          release_name: 'FastFiles ${{ github.ref_name }}'
-          body: |
-            ## FastFiles ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "FastFiles ${{ github.ref_name }}" \
+            --notes "## FastFiles ${{ github.ref_name }}
 
-            局域网零配置文件传输工具。
+          局域网零配置文件传输工具。
 
-            ### 下载
-            请根据您的操作系统选择对应的安装包。
+          ### 下载
+          请根据您的操作系统选择对应的安装包。
 
-            ### 更新内容
-            详见 git log。
-          draft: false
-          prerelease: false
+          ### 更新内容
+          详见 git log。" \
+            --target "${{ github.sha }}"
+          RELEASE_ID=$(gh release view "${{ github.ref_name }}" --json id -q '.id')
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
 
   # 第二步：多平台构建并上传产物
   build:
@@ -91,7 +90,7 @@ jobs:
       - name: 构建并上传 Tauri 应用
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           projectPath: './src-tauri'
