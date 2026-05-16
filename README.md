@@ -77,7 +77,7 @@
 
 ### 安装
 
-从 [GitHub Releases](https://github.com/nicedoc/fastfiles/releases) 下载对应平台的安装包：
+从 [GitHub Releases](https://github.com/shiyukonghui/FastFiles/releases) 下载对应平台的安装包：
 
 - **Windows**: `.msi` 安装程序或 `.exe` 安装包
 - **macOS**: `.dmg` 磁盘镜像
@@ -87,8 +87,8 @@
 
 ```bash
 # 1. 克隆项目
-git clone https://github.com/nicedoc/fastfiles.git
-cd fastfiles
+git clone https://github.com/shiyukonghui/FastFiles.git
+cd FastFiles
 
 # 2. 安装前端依赖
 npm install
@@ -189,7 +189,7 @@ FastFiles/
 
 ### Installation
 
-Download the installation package for your platform from [GitHub Releases](https://github.com/nicedoc/fastfiles/releases):
+Download the installation package for your platform from [GitHub Releases](https://github.com/shiyukonghui/FastFiles/releases):
 
 - **Windows**: `.msi` installer or `.exe` setup
 - **macOS**: `.dmg` disk image
@@ -199,8 +199,8 @@ Download the installation package for your platform from [GitHub Releases](https
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/nicedoc/fastfiles.git
-cd fastfiles
+git clone https://github.com/shiyukonghui/FastFiles.git
+cd FastFiles
 
 # 2. Install frontend dependencies
 npm install
