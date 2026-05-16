@@ -95,8 +95,33 @@ jobs:
       - name: 构建 Tauri 应用
         run: npm run tauri build
 
+      - name: 列出 bundle 目录内容（调试）
+        shell: bash
+        run: |
+          echo "=== bundle 目录结构 ==="
+          find src-tauri/target/release/bundle -type f 2>/dev/null || echo "目录不存在"
+
+      - name: 收集产物路径
+        id: artifacts
+        shell: bash
+        run: |
+          # 收集所有 bundle 产物到单个目录
+          mkdir -p upload
+          if [ "${{ matrix.platform }}" == "windows-latest" ]; then
+            cp src-tauri/target/release/bundle/msi/*.msi upload/ 2>/dev/null || true
+            cp src-tauri/target/release/bundle/nsis/*.exe upload/ 2>/dev/null || true
+          elif [ "${{ matrix.platform }}" == "macos-latest" ]; then
+            cp src-tauri/target/release/bundle/dmg/*.dmg upload/ 2>/dev/null || true
+            cp src-tauri/target/release/bundle/macos/*.app.tar.gz upload/ 2>/dev/null || true
+          else
+            cp src-tauri/target/release/bundle/deb/*.deb upload/ 2>/dev/null || true
+            cp src-tauri/target/release/bundle/appimage/*.AppImage upload/ 2>/dev/null || true
+          fi
+          echo "=== 待上传文件 ==="
+          ls -la upload/ 2>/dev/null || echo "无文件"
+
       - name: 上传产物到 Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          files: src-tauri/target/release/bundle/**/*
+          files: upload/*
