@@ -639,8 +639,7 @@ fn create_listener() -> io::Result<(std::net::TcpListener, u16)> {
         let sock_ref = socket2::SockRef::from(&socket);
         let keepalive = socket2::TcpKeepalive::new()
             .with_time(std::time::Duration::from_secs(30))
-            .with_interval(std::time::Duration::from_secs(10))
-            .with_retries(3);
+            .with_interval(std::time::Duration::from_secs(10));
         let _ = sock_ref.set_tcp_keepalive(&keepalive);
     }
 
