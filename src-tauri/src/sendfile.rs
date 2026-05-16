@@ -38,6 +38,7 @@ pub fn max_socket_buffer() -> usize {
 /// macOS: sendfile() with FreeBSD semantics (header+trailer not used)
 /// 注意：需要在 actix-web 外部通过 raw socket 使用
 #[cfg(unix)]
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 pub fn raw_sendfile(
     out_fd: std::os::fd::RawFd,
     in_fd: std::os::fd::RawFd,

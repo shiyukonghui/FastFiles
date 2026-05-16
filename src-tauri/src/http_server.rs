@@ -637,11 +637,11 @@ fn create_listener() -> io::Result<(std::net::TcpListener, u16)> {
     #[cfg(target_os = "linux")]
     {
         let sock_ref = socket2::SockRef::from(&socket);
-        let _ = sock_ref.set_tcp_keepalive(
-            Some(std::time::Duration::from_secs(30)),
-            Some(std::time::Duration::from_secs(10)),
-            3,
-        );
+        let keepalive = socket2::TcpKeepalive::new()
+            .with_time(std::time::Duration::from_secs(30))
+            .with_interval(std::time::Duration::from_secs(10))
+            .with_retries(3);
+        let _ = sock_ref.set_tcp_keepalive(&keepalive);
     }
 
     socket.bind(&addr.into())?;
