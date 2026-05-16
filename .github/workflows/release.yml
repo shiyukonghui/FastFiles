@@ -22,14 +22,18 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 创建 Release
+      - name: 创建或获取 Release
         id: create_release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --title "FastFiles ${{ github.ref_name }}" \
-            --notes "## FastFiles ${{ github.ref_name }}
+          # 检查 Release 是否已存在（如 workflow_dispatch 重新触发）
+          if gh release view "${{ github.ref_name }}" > /dev/null 2>&1; then
+            echo "Release ${{ github.ref_name }} 已存在，跳过创建"
+          else
+            gh release create "${{ github.ref_name }}" \
+              --title "FastFiles ${{ github.ref_name }}" \
+              --notes "## FastFiles ${{ github.ref_name }}
 
           局域网零配置文件传输工具。
 
@@ -38,7 +42,8 @@ jobs:
 
           ### 更新内容
           详见 git log。" \
-            --target "${{ github.sha }}"
+              --target "${{ github.sha }}"
+          fi
           RELEASE_ID=$(gh release view "${{ github.ref_name }}" --json id -q '.id')
           echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
 
