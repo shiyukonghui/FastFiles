@@ -87,10 +87,11 @@ jobs:
       - name: 安装前端依赖
         run: npm ci
 
-      - name: 构建并上传 Tauri 应用
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+      - name: 构建 Tauri 应用
+        run: npm run tauri build
+
+      - name: 上传产物到 Release
+        uses: softprops/action-gh-release@v2
         with:
-          releaseId: ${{ needs.create-release.outputs.release_id }}
-          projectPath: './src-tauri'
+          tag_name: ${{ github.ref_name }}
+          files: src-tauri/target/release/bundle/**/*
