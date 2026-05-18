@@ -2,12 +2,12 @@ import { useState, useCallback, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
   Container,
-  Typography,
   Button,
-  Box,
   Stack,
   Alert,
   CircularProgress,
+  AppBar,
+  Toolbar,
 } from '@mui/material';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
 import SharedFileList from './components/SharedFileList';
@@ -66,27 +66,12 @@ function App() {
   }, [refreshFiles, refreshServerInfo]);
 
   return (
-    <Container maxWidth="md" sx={{ py: 4 }}>
-      <Stack spacing={3}>
-        <Box textAlign="center">
-          <Typography variant="h4" fontWeight={700} gutterBottom>
-            FastFiles
-          </Typography>
-          <Typography variant="subtitle1" color="text.secondary">
-            局域网文件传输工具
-          </Typography>
-        </Box>
-
-        {error && (
-          <Alert severity="error" onClose={() => setError(null)}>
-            {error}
-          </Alert>
-        )}
-
-        <Box textAlign="center">
+    <>
+      <AppBar position="fixed">
+        <Toolbar sx={{ justifyContent: 'center' }}>
           <Button
             variant="contained"
-            size="large"
+            color="secondary"
             startIcon={loading ? undefined : <UploadFileIcon />}
             onClick={handleShare}
             disabled={loading}
@@ -97,16 +82,26 @@ function App() {
               '传输文件'
             )}
           </Button>
-        </Box>
+        </Toolbar>
+      </AppBar>
 
-        <SharedFileList
-          files={files}
-          serverInfo={serverInfo}
-          onDelete={handleDelete}
-          onRefresh={refreshFiles}
-        />
-      </Stack>
-    </Container>
+      <Container maxWidth="md" sx={{ mt: 10 }}>
+        <Stack spacing={3}>
+          {error && (
+            <Alert severity="error" onClose={() => setError(null)}>
+              {error}
+            </Alert>
+          )}
+
+          <SharedFileList
+            files={files}
+            serverInfo={serverInfo}
+            onDelete={handleDelete}
+            onRefresh={refreshFiles}
+          />
+        </Stack>
+      </Container>
+    </>
   );
 }
 
