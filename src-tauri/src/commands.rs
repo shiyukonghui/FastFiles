@@ -35,7 +35,12 @@ pub async fn share_file(
     let file = file_path.ok_or_else(|| "用户取消了选择".to_string())?;
     let path = file.into_path().map_err(|e| e.to_string())?;
 
-    let shared_file = state.file_manager.lock().unwrap().add_file(path);
+    let shared_file = state
+        .file_manager
+        .lock()
+        .unwrap()
+        .add_file(path)
+        .ok_or_else(|| "无法生成唯一验证码，请稍后重试".to_string())?;
 
     let need_start = {
         let server = state.http_server.lock().unwrap();

@@ -22,6 +22,17 @@ fn generate_code() -> String {
         .collect()
 }
 
+fn generate_unique_code(existing_codes: &std::collections::HashSet<String>) -> Option<String> {
+    const MAX_RETRIES: usize = 100;
+    for _ in 0..MAX_RETRIES {
+        let code = generate_code();
+        if !existing_codes.contains(&code) {
+            return Some(code);
+        }
+    }
+    None
+}
+
 pub struct FileManager {
     files: Arc<Mutex<HashMap<String, SharedFile>>>,
 }
@@ -33,7 +44,7 @@ impl FileManager {
         }
     }
 
-    pub fn add_file(&self, path: PathBuf) -> SharedFile {
+    pub fn add_file(&self, path: PathBuf) -> Option<SharedFile> {
         let file_name = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -43,7 +54,13 @@ impl FileManager {
         let file_size = std::fs::metadata(&path)
             .map(|m| m.len())
             .unwrap_or(0);
-        let code = generate_code();
+        
+        let code = {
+            let files = self.files.lock().unwrap();
+            let existing_codes: std::collections::HashSet<String> = files.keys().cloned().collect();
+            generate_unique_code(&existing_codes)?
+        };
+        
         let shared_file = SharedFile {
             code: code.clone(),
             file_name,
@@ -54,7 +71,7 @@ impl FileManager {
             .lock()
             .unwrap()
             .insert(code.clone(), shared_file.clone());
-        shared_file
+        Some(shared_file)
     }
 
     pub fn remove_file(&self, code: &str) -> bool {
