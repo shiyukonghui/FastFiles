@@ -50,9 +50,9 @@ function App() {
     }
   };
 
-  const handleDelete = async (token: string) => {
+  const handleDelete = async (code: string) => {
     try {
-      await invoke('delete_shared_file', { token });
+      await invoke('delete_shared_file', { code });
       await refreshFiles();
       await refreshServerInfo();
     } catch (e) {

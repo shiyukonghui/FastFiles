@@ -24,7 +24,7 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import { formatFileSize } from '../utils/format';
 
 export interface SharedFile {
-  token: string;
+  code: string;
   file_name: string;
   file_path: string;
   file_size: number;
@@ -42,17 +42,19 @@ export interface ServerInfo {
 interface SharedFileListProps {
   files: SharedFile[];
   serverInfo: ServerInfo;
-  onDelete: (token: string) => void;
+  onDelete: (code: string) => void;
   onRefresh: () => void;
 }
 
 function SharedFileList({ files, serverInfo, onDelete, onRefresh }: SharedFileListProps) {
   const [snackbarOpen, setSnackbarOpen] = useState(false);
+  const [snackbarMsg, setSnackbarMsg] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<SharedFile | null>(null);
 
-  const handleCopy = async (url: string) => {
+  const handleCopy = async (text: string, msg: string) => {
     try {
-      await navigator.clipboard.writeText(url);
+      await navigator.clipboard.writeText(text);
+      setSnackbarMsg(msg);
       setSnackbarOpen(true);
     } catch {
       setSnackbarOpen(false);
@@ -61,7 +63,7 @@ function SharedFileList({ files, serverInfo, onDelete, onRefresh }: SharedFileLi
 
   const handleConfirmDelete = () => {
     if (deleteTarget) {
-      onDelete(deleteTarget.token);
+      onDelete(deleteTarget.code);
       setDeleteTarget(null);
     }
   };
@@ -87,10 +89,48 @@ function SharedFileList({ files, serverInfo, onDelete, onRefresh }: SharedFileLi
 
   return (
     <>
+      <Box sx={{ mb: 3, p: 2, bgcolor: 'background.paper', borderRadius: 2 }}>
+        <Typography variant="subtitle2" color="text.secondary" gutterBottom>
+          分享链接
+        </Typography>
+        <Stack spacing={1}>
+          {serverInfo.base_urls.map((baseUrl, idx) => (
+            <Stack key={idx} direction="row" spacing={1} alignItems="center">
+              <Chip
+                label={serverInfo.ips[idx]}
+                size="small"
+                variant="outlined"
+                sx={{ minWidth: 110, flexShrink: 0 }}
+              />
+              <TextField
+                value={`${baseUrl}/fsf`}
+                size="small"
+                fullWidth
+                variant="outlined"
+                slotProps={{
+                  input: {
+                    readOnly: true,
+                    sx: { fontSize: '0.85rem' },
+                  },
+                }}
+                sx={{ flex: 1 }}
+              />
+              <IconButton
+                aria-label="复制链接"
+                onClick={() => handleCopy(`${baseUrl}/fsf`, '链接已复制到剪贴板')}
+                size="small"
+              >
+                <ContentCopyIcon fontSize="small" />
+              </IconButton>
+            </Stack>
+          ))}
+        </Stack>
+      </Box>
+
       <List>
         {files.map((file) => (
           <ListItem
-            key={file.token}
+            key={file.code}
             divider
             secondaryAction={
               <IconButton
@@ -101,7 +141,7 @@ function SharedFileList({ files, serverInfo, onDelete, onRefresh }: SharedFileLi
                 <DeleteIcon />
               </IconButton>
             }
-            sx={{ pr: 6, flexDirection: 'column', alignItems: 'stretch' }}
+            sx={{ pr: 6 }}
           >
             <ListItemText
               primary={file.file_name}
@@ -109,40 +149,21 @@ function SharedFileList({ files, serverInfo, onDelete, onRefresh }: SharedFileLi
               secondary={formatFileSize(file.file_size)}
               secondaryTypographyProps={{ component: 'span' }}
             />
-            <Stack spacing={1} sx={{ mt: 1 }}>
-              {serverInfo.base_urls.map((baseUrl, idx) => {
-                const url = `${baseUrl}/download/${file.token}`;
-                return (
-                  <Stack key={idx} direction="row" spacing={1} alignItems="center">
-                    <Chip
-                      label={serverInfo.ips[idx]}
-                      size="small"
-                      variant="outlined"
-                      sx={{ minWidth: 110, flexShrink: 0 }}
-                    />
-                    <TextField
-                      value={url}
-                      size="small"
-                      fullWidth
-                      variant="outlined"
-                      slotProps={{
-                        input: {
-                          readOnly: true,
-                          sx: { fontSize: '0.8rem' },
-                        },
-                      }}
-                      sx={{ flex: 1 }}
-                    />
-                    <IconButton
-                      aria-label="复制链接"
-                      onClick={() => handleCopy(url)}
-                      size="small"
-                    >
-                      <ContentCopyIcon fontSize="small" />
-                    </IconButton>
-                  </Stack>
-                );
-              })}
+            <Stack direction="row" spacing={1} alignItems="center" sx={{ ml: 2 }}>
+              <Chip
+                label={file.code}
+                size="small"
+                color="primary"
+                variant="outlined"
+                sx={{ fontWeight: 600, fontSize: '0.9rem' }}
+              />
+              <IconButton
+                aria-label="复制验证码"
+                onClick={() => handleCopy(file.code, '验证码已复制到剪贴板')}
+                size="small"
+              >
+                <ContentCopyIcon fontSize="small" />
+              </IconButton>
             </Stack>
           </ListItem>
         ))}
@@ -152,7 +173,7 @@ function SharedFileList({ files, serverInfo, onDelete, onRefresh }: SharedFileLi
         <DialogTitle>确认删除</DialogTitle>
         <DialogContent>
           <DialogContentText>
-            确定要删除该共享文件吗？删除后下载链接将立即失效。
+            确定要删除该共享文件吗？删除后验证码将立即失效。
           </DialogContentText>
         </DialogContent>
         <DialogActions>
@@ -170,7 +191,7 @@ function SharedFileList({ files, serverInfo, onDelete, onRefresh }: SharedFileLi
         anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
       >
         <Alert severity="success" variant="filled" sx={{ width: '100%' }}>
-          链接已复制到剪贴板
+          {snackbarMsg}
         </Alert>
       </Snackbar>
     </>

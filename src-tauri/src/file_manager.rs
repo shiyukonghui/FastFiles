@@ -1,14 +1,25 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use uuid::Uuid;
+use rand::Rng;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SharedFile {
-    pub token: String,
+    pub code: String,
     pub file_name: String,
     pub file_path: String,
     pub file_size: u64,
+}
+
+fn generate_code() -> String {
+    const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut rng = rand::thread_rng();
+    (0..4)
+        .map(|_| {
+            let idx = rng.gen_range(0..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect()
 }
 
 pub struct FileManager {
@@ -32,9 +43,9 @@ impl FileManager {
         let file_size = std::fs::metadata(&path)
             .map(|m| m.len())
             .unwrap_or(0);
-        let token = Uuid::new_v4().to_string();
+        let code = generate_code();
         let shared_file = SharedFile {
-            token: token.clone(),
+            code: code.clone(),
             file_name,
             file_path,
             file_size,
@@ -42,16 +53,16 @@ impl FileManager {
         self.files
             .lock()
             .unwrap()
-            .insert(token.clone(), shared_file.clone());
+            .insert(code.clone(), shared_file.clone());
         shared_file
     }
 
-    pub fn remove_file(&self, token: &str) -> bool {
-        self.files.lock().unwrap().remove(token).is_some()
+    pub fn remove_file(&self, code: &str) -> bool {
+        self.files.lock().unwrap().remove(code).is_some()
     }
 
-    pub fn get_file(&self, token: &str) -> Option<SharedFile> {
-        self.files.lock().unwrap().get(token).cloned()
+    pub fn get_file(&self, code: &str) -> Option<SharedFile> {
+        self.files.lock().unwrap().get(code).cloned()
     }
 
     pub fn list_files(&self) -> Vec<SharedFile> {

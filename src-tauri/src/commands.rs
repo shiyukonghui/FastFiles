@@ -58,8 +58,8 @@ pub fn get_shared_files(state: State<'_, AppState>) -> Vec<SharedFile> {
 }
 
 #[tauri::command]
-pub fn delete_shared_file(state: State<'_, AppState>, token: String) -> Result<(), String> {
-    let removed = state.file_manager.lock().unwrap().remove_file(&token);
+pub fn delete_shared_file(state: State<'_, AppState>, code: String) -> Result<(), String> {
+    let removed = state.file_manager.lock().unwrap().remove_file(&code);
     if !removed {
         return Err("文件不存在".to_string());
     }

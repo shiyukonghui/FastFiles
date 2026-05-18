@@ -15,10 +15,9 @@ use futures_util::StreamExt;
 use crate::file_manager::FileManager;
 use crate::sendfile;
 
-const CHUNK_SIZE: usize = 64 * 1024 * 1024; // 64MB 分块，减少通道开销
-const CHANNEL_CAP: usize = 4; // 通道容量（最多 256MB 数据在管道中）
+const CHUNK_SIZE: usize = 64 * 1024 * 1024;
+const CHANNEL_CAP: usize = 4;
 
-// mmap 包装器，使 bytes::Bytes 零拷贝引用 mmap 内存区域
 struct MmapBytes(Mmap);
 
 impl AsRef<[u8]> for MmapBytes {
@@ -30,9 +29,6 @@ impl AsRef<[u8]> for MmapBytes {
 unsafe impl Send for MmapBytes {}
 unsafe impl Sync for MmapBytes {}
 
-/// mmap 零拷贝 + 流式分块传输
-/// 核心：mmap 整个文件 → Bytes::from_owner（零拷贝）→ 分片 stream
-/// 内存：Linux 上 madvise(DONTNEED) 主动释放已发送页；每连接内存 ≈ CHUNK_SIZE × CHANNEL_CAP
 fn file_stream(
     path: std::path::PathBuf,
     start_offset: u64,
@@ -41,9 +37,7 @@ fn file_stream(
     let (tx, rx) = mpsc::channel::<Result<web::Bytes, std::io::Error>>(CHANNEL_CAP);
 
     tokio::task::spawn_blocking(move || {
-        // 尝试 mmap 路径（最高性能），失败回退到 read
         if let Err(e) = stream_mmap(&path, start_offset, length, &tx) {
-            // mmap 失败，回退到传统 read 路径
             stream_read(&path, start_offset, length, &tx, e);
         }
     });
@@ -51,7 +45,6 @@ fn file_stream(
     ReceiverStream::new(rx).map(|r| r.map_err(actix_web::Error::from))
 }
 
-/// mmap 零拷贝路径：Bytes::from_owner + Bytes::slice（零拷贝分片视图）
 fn stream_mmap(
     path: &std::path::Path,
     start_offset: u64,
@@ -64,10 +57,7 @@ fn stream_mmap(
         sendfile::fadvise_sequential(&file, meta.len());
     }
 
-    // mmap 整个文件到虚拟地址空间
     let mmap = unsafe { Mmap::map(&file)? };
-
-    // 零拷贝包装为 Bytes（引用计数管理 mmap 生命周期）
     let full_bytes = web::Bytes::from_owner(MmapBytes(mmap));
 
     let mut offset = start_offset as usize;
@@ -75,16 +65,12 @@ fn stream_mmap(
 
     while offset < end {
         let chunk_end = (offset + CHUNK_SIZE).min(end);
-
-        // Bytes::slice — 零拷贝子视图，共享底层 mmap
         let chunk = full_bytes.slice(offset..chunk_end);
 
         if tx.blocking_send(Ok(chunk)).is_err() {
-            break; // 客户端断开，停止发送
+            break;
         }
 
-        // Linux: 通知操作系统释放已发送页的物理内存
-        // 这是 madvise(MADV_DONTNEED) — 该页从进程工作集移除，OS 可回收
         #[cfg(target_os = "linux")]
         unsafe {
             let ptr = full_bytes.as_ptr().add(offset) as *mut libc::c_void;
@@ -98,7 +84,6 @@ fn stream_mmap(
     Ok(())
 }
 
-/// 回退路径：传统 read 分块读取（mmap 失败时使用）
 fn stream_read(
     path: &std::path::Path,
     start_offset: u64,
@@ -148,7 +133,6 @@ fn stream_read(
     }
 }
 
-/// 读取文件的指定字节范围到内存（用于多范围请求的小段合并）
 fn read_file_range(path: &std::path::Path, start: u64, length: u64) -> io::Result<Vec<u8>> {
     let mut file = std::fs::File::open(path)?;
     use std::io::{Read, Seek, SeekFrom};
@@ -160,11 +144,10 @@ fn read_file_range(path: &std::path::Path, start: u64, length: u64) -> io::Resul
     Ok(buf)
 }
 
-/// 解析 Range 请求头
 #[derive(Debug, Clone)]
 struct HttpRange {
     start: u64,
-    end: u64, // 包含边界
+    end: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -187,7 +170,6 @@ fn parse_range_header(range_str: &str, file_size: u64) -> Option<RangeRequest> {
         }
 
         if part.starts_with('-') {
-            // 后缀范围: bytes=-N（最后 N 字节）
             let suffix_len: u64 = part[1..].parse().ok()?;
             if suffix_len == 0 {
                 return None;
@@ -261,7 +243,162 @@ fn file_icon(file_name: &str) -> &'static str {
     }
 }
 
-fn render_download_page(file_name: &str, file_size: u64, token: &str) -> String {
+fn render_fsf_entry_page(error: Option<&str>) -> String {
+    let error_html = if let Some(msg) = error {
+        format!(
+            r#"<div class="error-msg" style="color: #e74c3c; margin-bottom: 16px; font-size: 14px;">{}</div>"#,
+            msg
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FastFiles 文件分享</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Microsoft YaHei", sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            color: #333;
+        }}
+        .container {{
+            background: #ffffff;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+            padding: 48px 44px;
+            max-width: 420px;
+            width: 92%;
+            text-align: center;
+        }}
+        .logo {{
+            font-size: 48px;
+            margin-bottom: 16px;
+        }}
+        h1 {{
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #1a1a2e;
+        }}
+        .subtitle {{
+            font-size: 14px;
+            color: #888;
+            margin-bottom: 32px;
+        }}
+        .input-group {{
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            margin-bottom: 24px;
+        }}
+        .code-input {{
+            width: 52px;
+            height: 56px;
+            text-align: center;
+            font-size: 24px;
+            font-weight: 600;
+            text-transform: uppercase;
+            border: 2px solid #e0e0e0;
+            border-radius: 12px;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }}
+        .code-input:focus {{
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2);
+        }}
+        .submit-btn {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #ffffff;
+            border: none;
+            padding: 14px 48px;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }}
+        .submit-btn:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4);
+        }}
+        .footer {{
+            margin-top: 32px;
+            font-size: 12px;
+            color: #ccc;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">📁</div>
+        <h1>FastFiles</h1>
+        <div class="subtitle">请输入4位验证码获取文件</div>
+        {error_html}
+        <form action="/fsf/verify" method="GET" onsubmit="return handleSubmit(event)">
+            <div class="input-group">
+                <input type="text" class="code-input" maxlength="1" data-index="0" autocomplete="off">
+                <input type="text" class="code-input" maxlength="1" data-index="1" autocomplete="off">
+                <input type="text" class="code-input" maxlength="1" data-index="2" autocomplete="off">
+                <input type="text" class="code-input" maxlength="1" data-index="3" autocomplete="off">
+            </div>
+            <input type="hidden" name="code" id="code">
+            <button type="submit" class="submit-btn">获取文件</button>
+        </form>
+        <div class="footer">由 <strong>FastFiles</strong> 提供 · 局域网极速传输</div>
+    </div>
+    <script>
+        const inputs = document.querySelectorAll('.code-input');
+        inputs.forEach((input, idx) => {{
+            input.addEventListener('input', (e) => {{
+                const value = e.target.value.toUpperCase();
+                e.target.value = value;
+                if (value && idx < 3) {{
+                    inputs[idx + 1].focus();
+                }}
+            }});
+            input.addEventListener('keydown', (e) => {{
+                if (e.key === 'Backspace' && !e.target.value && idx > 0) {{
+                    inputs[idx - 1].focus();
+                }}
+            }});
+            input.addEventListener('paste', (e) => {{
+                e.preventDefault();
+                const pasted = (e.clipboardData || window.clipboardData).getData('text').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+                pasted.split('').forEach((char, i) => {{
+                    if (inputs[i]) inputs[i].value = char;
+                }});
+                if (pasted.length > 0) inputs[Math.min(pasted.length, 3)].focus();
+            }});
+        }});
+        function handleSubmit(e) {{
+            const code = Array.from(inputs).map(i => i.value.toUpperCase()).join('');
+            if (code.length !== 4) {{
+                e.preventDefault();
+                alert('请输入4位验证码');
+                return false;
+            }}
+            document.getElementById('code').value = code;
+            return true;
+        }}
+        inputs[0].focus();
+    </script>
+</body>
+</html>"#
+    )
+}
+
+fn render_download_page(file_name: &str, file_size: u64, code: &str) -> String {
     let size_str = format_file_size(file_size);
     let icon = file_icon(file_name);
 
@@ -380,7 +517,7 @@ fn render_download_page(file_name: &str, file_size: u64, token: &str) -> String 
         <div class="file-icon">{icon}</div>
         <h2>{file_name}</h2>
         <div class="file-meta">文件大小：{size_str}</div>
-        <a class="download-btn" href="/api/download/{token}" download>⬇ 下载文件</a>
+        <a class="download-btn" href="/api/fsf/download/{code}" download>⬇ 下载文件</a>
         <div class="features">
             <div class="title">💡 下载提示</div>
             <span class="tag">断点续传</span> <span class="tag">多线程加速</span> <span class="tag">Range 支持</span>
@@ -398,8 +535,8 @@ wget -c "{{api_url}}"</div>
     </div>
     <script>
         (function() {{
-            var apiUrl = location.origin + '/api/download/{token}';
-            var downloadUrl = location.origin + '/download/{token}';
+            var apiUrl = location.origin + '/api/fsf/download/{code}';
+            var downloadUrl = location.origin + '/fsf/verify?code={code}';
             document.querySelectorAll('.cli-box').forEach(function(el) {{
                 el.textContent = el.textContent.replace('{{{{download_url}}}}', downloadUrl).replace('{{{{api_url}}}}', apiUrl);
             }});
@@ -410,7 +547,7 @@ wget -c "{{api_url}}"</div>
         icon = icon,
         file_name = file_name,
         size_str = size_str,
-        token = token,
+        code = code,
     )
 }
 
@@ -461,43 +598,92 @@ fn render_404_page() -> String {
             color: #888;
             line-height: 1.8;
         }
+        .back-link {
+            display: inline-block;
+            margin-top: 24px;
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 500;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>404</h1>
-        <h2>文件未找到</h2>
-        <p>该下载链接可能已过期，或文件已被分享者删除。<br>请联系分享者获取新的下载链接。</p>
+        <h2>验证码无效</h2>
+        <p>该验证码不存在或文件已被分享者删除。<br>请检查验证码是否正确，或联系分享者获取新的验证码。</p>
+        <a class="back-link" href="/fsf">← 返回重新输入</a>
     </div>
 </body>
 </html>"#.to_string()
 }
 
-async fn download_page(
+async fn fsf_entry_page() -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(render_fsf_entry_page(None))
+}
+
+async fn fsf_verify_page(
     req: HttpRequest,
     fm: web::Data<std::sync::Mutex<FileManager>>,
 ) -> HttpResponse {
-    let token = req.match_info().get("token").unwrap_or("");
+    let code = req
+        .query_string()
+        .split('&')
+        .find_map(|pair| {
+            let mut parts = pair.split('=');
+            if parts.next() == Some("code") {
+                parts.next()
+            } else {
+                None
+            }
+        })
+        .unwrap_or("");
+
+    let code = urlencoding_decode(code);
+
+    if code.len() != 4 {
+        return HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8")
+            .body(render_fsf_entry_page(Some("请输入4位验证码")));
+    }
 
     let shared_file = {
         let mgr = fm.lock().unwrap();
-        mgr.get_file(token)
+        mgr.get_file(&code)
     };
 
     match shared_file {
         Some(file) => {
-            let html = render_download_page(&file.file_name, file.file_size, &file.token);
+            let html = render_download_page(&file.file_name, file.file_size, &file.code);
             HttpResponse::Ok()
                 .content_type("text/html; charset=utf-8")
                 .body(html)
         }
         None => {
-            let html = render_404_page();
-            HttpResponse::NotFound()
+            HttpResponse::Ok()
                 .content_type("text/html; charset=utf-8")
-                .body(html)
+                .body(render_fsf_entry_page(Some("验证码无效，请检查后重试")))
         }
     }
+}
+
+fn urlencoding_decode(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            if let (Some(h), Some(l)) = (chars.next(), chars.next()) {
+                if let (Some(h), Some(l)) = (h.to_digit(16), l.to_digit(16)) {
+                    result.push(char::from_u32(h * 16 + l).unwrap_or(c));
+                    continue;
+                }
+            }
+        }
+        result.push(c);
+    }
+    result
 }
 
 fn add_cors_headers(response: &mut HttpResponseBuilder) {
@@ -508,15 +694,15 @@ fn add_cors_headers(response: &mut HttpResponseBuilder) {
     ));
 }
 
-async fn api_download(
+async fn api_fsf_download(
     req: HttpRequest,
     fm: web::Data<std::sync::Mutex<FileManager>>,
 ) -> HttpResponse<BoxBody> {
-    let token = req.match_info().get("token").unwrap_or("");
+    let code = req.match_info().get("code").unwrap_or("");
 
     let shared_file = {
         let mgr = fm.lock().unwrap();
-        mgr.get_file(token)
+        mgr.get_file(code)
     };
 
     let file = match shared_file {
@@ -538,7 +724,6 @@ async fn api_download(
     let file_size = file.file_size;
     let file_name = file.file_name.clone();
 
-    // 解析 Range 请求头
     let range_header = req
         .headers()
         .get(actix_web::http::header::RANGE)
@@ -546,7 +731,6 @@ async fn api_download(
 
     match range_header.and_then(|r| parse_range_header(r, file_size)) {
         Some(range_req) if range_req.ranges.len() == 1 => {
-            // 单范围 → 流式传输指定偏移的字节范围
             let r = &range_req.ranges[0];
             let length = r.end - r.start + 1;
             let stream = file_stream(file_path.clone(), r.start, length);
@@ -565,7 +749,6 @@ async fn api_download(
             response.streaming(stream)
         }
         Some(range_req) => {
-            // 多范围 → 读取各段到内存合并为 multipart 响应（通常段很小）
             let boundary = format!("fastfiles_boundary_{}", uuid::Uuid::new_v4());
             let content_type_val = format!("multipart/byteranges; boundary={}", boundary);
             let mut body_parts: Vec<u8> = Vec::new();
@@ -598,7 +781,6 @@ async fn api_download(
             response.body(body_parts)
         }
         None => {
-            // 无 Range → 流式传输完整文件
             let stream = file_stream(file_path, 0, file_size);
 
             let mut response = HttpResponse::Ok();
@@ -616,23 +798,17 @@ async fn api_download(
     }
 }
 
-/// 创建 TCP 监听器，配置最优传输参数
 fn create_listener() -> io::Result<(std::net::TcpListener, u16)> {
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 0));
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
 
-    // 端口复用
     socket.set_reuse_address(true)?;
-
-    // TCP_NODELAY：禁用 Nagle 算法，消除小包延迟
     socket.set_nodelay(true)?;
 
-    // 最大化 socket 缓冲区
     let max_buf = sendfile::max_socket_buffer();
     let _ = socket.set_send_buffer_size(max_buf);
     let _ = socket.set_recv_buffer_size(max_buf);
 
-    // TCP Keep-Alive 保持长连接存活
     let _ = socket.set_keepalive(true);
     #[cfg(target_os = "linux")]
     {
@@ -682,8 +858,9 @@ impl HttpFileServer {
         let server = HttpServer::new(move || {
             App::new()
                 .app_data(fm_data.clone())
-                .route("/download/{token}", web::get().to(download_page))
-                .route("/api/download/{token}", web::get().to(api_download))
+                .route("/fsf", web::get().to(fsf_entry_page))
+                .route("/fsf/verify", web::get().to(fsf_verify_page))
+                .route("/api/fsf/download/{code}", web::get().to(api_fsf_download))
         })
         .workers(worker_count)
         .keep_alive(std::time::Duration::from_secs(120))
