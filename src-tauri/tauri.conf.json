@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedoc/nicedoc.github.io/main/jsonschema/tauri-2.schema.json",
   "productName": "FastFiles",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "identifier": "com.fastfiles.app",
   "build": {
     "frontendDist": "../dist",
