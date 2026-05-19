@@ -20,7 +20,6 @@ import {
 } from '@mui/material';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import DeleteIcon from '@mui/icons-material/Delete';
-import RefreshIcon from '@mui/icons-material/Refresh';
 import { formatFileSize } from '../utils/format';
 
 export interface SharedFile {
@@ -43,10 +42,9 @@ interface SharedFileListProps {
   files: SharedFile[];
   serverInfo: ServerInfo;
   onDelete: (code: string) => void;
-  onRefresh: () => void;
 }
 
-function SharedFileList({ files, serverInfo, onDelete, onRefresh }: SharedFileListProps) {
+function SharedFileList({ files, serverInfo, onDelete }: SharedFileListProps) {
   const [snackbarOpen, setSnackbarOpen] = useState(false);
   const [snackbarMsg, setSnackbarMsg] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<SharedFile | null>(null);
@@ -71,18 +69,9 @@ function SharedFileList({ files, serverInfo, onDelete, onRefresh }: SharedFileLi
   if (files.length === 0) {
     return (
       <Box textAlign="center" sx={{ mt: 6 }}>
-        <Typography variant="body1" color="text.secondary" gutterBottom>
+        <Typography variant="body1" color="text.secondary">
           暂无共享文件，点击上方按钮选择文件开始分享
         </Typography>
-        <Button
-          variant="outlined"
-          size="small"
-          startIcon={<RefreshIcon />}
-          onClick={onRefresh}
-          sx={{ mt: 1 }}
-        >
-          刷新列表
-        </Button>
       </Box>
     );
   }

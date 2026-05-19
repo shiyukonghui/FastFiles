@@ -44,7 +44,10 @@ function App() {
       await refreshFiles();
       await refreshServerInfo();
     } catch (e) {
-      setError(String(e));
+      const errMsg = String(e);
+      if (errMsg !== '用户取消了选择') {
+        setError(errMsg);
+      }
     } finally {
       setLoading(false);
     }
@@ -97,7 +100,6 @@ function App() {
             files={files}
             serverInfo={serverInfo}
             onDelete={handleDelete}
-            onRefresh={refreshFiles}
           />
         </Stack>
       </Container>
